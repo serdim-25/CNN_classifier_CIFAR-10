@@ -1,0 +1,199 @@
+import torch 
+import torchvision 
+import torchvision.transforms as tf
+import torch.utils.data as data 
+import torch.nn as nn
+import torch.optim as optim
+import matplotlib.pyplot as plt
+from torch.optim.lr_scheduler import StepLR
+
+
+transform = tf.Compose([
+    tf.RandomHorizontalFlip(),
+    tf.RandomCrop(32, padding=4),
+    tf.ToTensor(),
+    tf.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+])
+
+target_class_1 = 0
+target_class_2 = 2
+
+trainset = torchvision.datasets.CIFAR10(
+    root='./data',
+    train=True,
+    download=True,
+    transform=transform
+)
+
+testset = torchvision.datasets.CIFAR10(
+    root='./data',
+    train=False,
+    download=True,
+    transform=transform
+)
+
+class_indices_train = [i for i, (_, label) in enumerate(trainset) if label == target_class_1 or label == target_class_2]
+class_indices_test = [i for i, (_, label) in enumerate(testset) if label == target_class_1 or label == target_class_2]
+
+train_subset = data.Subset(trainset , class_indices_train)
+test_subset = data.Subset(testset , class_indices_test)
+
+train_data = data.DataLoader(
+    train_subset , 
+    batch_size=32 , 
+    shuffle=True
+)
+
+test_data = data.DataLoader(
+    test_subset , 
+    batch_size=32 , 
+    shuffle=False
+)
+
+class CNNClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.cnn = nn.Sequential(
+            nn.Conv2d(in_channels=3 , out_channels=16 , kernel_size=3 , stride=1 , padding=1) ,  
+            nn.BatchNorm2d(16) , 
+            nn.ReLU(inplace=True) , 
+            nn.MaxPool2d(kernel_size=2) , 
+            nn.Dropout2d(0.1) , 
+
+            nn.Conv2d(in_channels=16 , out_channels=32 , kernel_size=3 , stride=1 , padding=1) , 
+            nn.BatchNorm2d(32) , 
+            nn.ReLU(inplace=True) , 
+            nn.MaxPool2d(kernel_size=2) ,
+            nn.Dropout2d(0.1) , 
+
+            nn.Conv2d(in_channels=32 , out_channels=64 , kernel_size=3 , stride=1 , padding=1) , 
+            nn.BatchNorm2d(64) ,
+            nn.ReLU(inplace=True) , 
+            nn.MaxPool2d(kernel_size=2) , 
+            nn.Dropout2d(0.1)
+
+        ) 
+        self.layer = nn.Sequential(
+            nn.Flatten() ,
+            nn.Linear(1024 , 256) , 
+            nn.ReLU(inplace=True) , 
+            nn.Dropout(0.2)  , 
+            nn.Linear(256 , 2) , 
+            
+        )
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_uniform_(m.weight, mode='fan_in', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, mode='fan_in', nonlinearity='relu')
+                nn.init.zeros_(m.bias)
+    
+    def forward(self , x):
+        x = self.cnn(x)
+        x = self.layer(x)
+        return x 
+    
+model = CNNClassifier()
+model._initialize_weights()
+opt = optim.Adam(params=model.parameters() , lr = 0.01)
+loss_func = nn.CrossEntropyLoss()
+scheduler = StepLR(opt, step_size=40, gamma=0.5)
+
+ephos = 0
+
+loss_train = [] 
+loss_test = []
+correct_train_mean = []
+correct_test_mean = []
+best_accuracy = 0.0
+best_ephos = 0 
+
+for e in range(ephos):
+    model.train()
+    loss_train_mean = 0
+    total_train_examples = 0
+    correct_train = 0 
+
+    for x_train , y_train in train_data : 
+        predict = model(x_train).squeeze()
+        y_train = (y_train / 2).long()
+        loss = loss_func(predict , y_train)
+
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+        loss_train_mean += loss.item()
+        total_train_examples += y_train.size(0) 
+        pred_labels = (torch.argmax(predict , dim = 1)).float()
+        correct_train += (pred_labels == y_train).float().sum().item()
+
+
+    loss_train_mean /= len(train_data)
+    loss_train.append(loss_train_mean)
+    correct_train = correct_train / total_train_examples
+    correct_train_mean.append(correct_train)
+    scheduler.step()
+    
+    with torch.no_grad():
+        model.eval()
+        loss_test_mean = 0
+        total_test_examples = 0
+        correct_test = 0
+        for x_test , y_test in test_data:
+            predict = model(x_test)
+            y_test = (y_test / 2).long()
+            loss = loss_func(predict.squeeze() , y_test)
+
+            loss_test_mean += loss.item()
+            total_test_examples += y_test.size(0) 
+            pred_labels = (torch.argmax(predict , dim = 1)).float()
+            correct_test += (pred_labels == y_test).float().sum().item()
+
+        
+        loss_test_mean /= len(test_data)
+        loss_test.append(loss_test_mean)
+        correct_test = correct_test / total_test_examples
+        correct_test_mean.append(correct_test)
+
+        if correct_test >= best_accuracy:
+            best_accuracy = correct_test
+            best_ephos = e
+            torch.save(model.state_dict(), 'best_model_CNNbinary_ps_7.pt')
+
+# plt.plot(list(range(1 , ephos+1)) , loss_train , color = 'red')  
+# plt.plot(list(range(1 , ephos+1)) , loss_test , color = 'green')          
+# plt.title("потери")
+# plt.xlabel("ephos")
+# plt.ylabel("loss")    
+# plt.grid(True)                           
+# plt.show()
+
+# plt.plot(list(range(1 , ephos+1)) , correct_train_mean , color = 'red')  
+# plt.plot(list(range(1 , ephos+1)) , correct_test_mean , color = 'green')          
+# plt.title("точность")
+# plt.xlabel("ephos")
+# plt.ylabel("acurracy")    
+# plt.grid(True)                           
+# plt.show()
+
+# print(best_accuracy)
+# print(best_ephos)
+
+model2 = CNNClassifier()
+weight = torch.load('C:\\my_python\\best_model_CNNbinary_ps_7.pt')
+model2.load_state_dict(weight)
+res = []
+
+for i in range(100):
+    x_test , y_test = next(iter(test_data))
+    y_test = y_test / 2
+    predict = model2(x_test)
+    pred_labels = (torch.argmax(predict , dim = 1)).float()
+    res.append(((pred_labels.reshape(1,-1) == y_test).sum()/len(y_test)).mean().item())
+
+print(sum(res) / 100)
